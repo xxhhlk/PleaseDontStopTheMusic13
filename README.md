@@ -50,7 +50,9 @@ Crucially, it does **not** force mixing on whichever app is the primary music so
 
 Fork: <https://github.com/xxhhlk/PleaseDontStopTheMusic13> (upstream: `mikey820/PleaseDontStopTheMusic`).
 
-This build targets `firmware >= 13.0` (rootful, arm64). On top of the upstream hooks it adds:
+This build targets `firmware >= 13.0` (rootful). Both slices are produced: `arm64` and `arm64e`. The `arm64e` slice is required because Settings and other system processes on A12+ devices are `arm64e` and refuse to load an `arm64`-only binary — the preference bundle failed with `arm64 dylibs cannot be loaded into arm64e processes` until the second slice was added. iOS 12–13.7 use the pre-iOS-14 `arm64e` ABI, so this has to be built with a clang 11 toolchain (`cpusubtype 0x02`); clang 12+ emits the newer ABI and the linker rejects it.
+
+On top of the upstream hooks it adds:
 
 - **AudioUnit layer** — `AudioUnitInitialize`, `AudioOutputUnitStart` and `AUGraphStart` are hooked, and the session is made mixable *before* the unit starts. Apps that never touch `AVAudioSession` (UU Remote, for example) activate the session inside AudioToolbox; without this hook they still interrupt playback.
 - **Legacy AudioSession C API** — `AudioSessionSetActive` / `AudioSessionSetProperty` are hooked and `kAudioSessionProperty_OverrideCategoryMixWithOthers` is forced.
@@ -67,7 +69,7 @@ This build targets `firmware >= 13.0` (rootful, arm64). On top of the upstream h
 | `AlwaysMixAll` | bool | demote every app except `NeverMix` |
 | `DebugLog` | bool | write `/var/mobile/Library/Logs/PDSTM.log` |
 
-- **Settings pane** — `设置 → PleaseDontStopTheMusic`, backed by a `PreferenceLoader` bundle, so the same values can be changed without editing plists: master switch, debug logging, the `AlwaysMixAll` toggle, and one app picker per list (installed apps are enumerated through `LSApplicationWorkspace` and toggled on and off). The prefs file is created on the first change and is not part of the package, so upgrading never overwrites an existing configuration.
+- **Settings pane** — `设置 → PleaseDontStopTheMusic`, backed by a `PreferenceLoader` bundle, so the same values can be changed without editing plists: master switch, debug logging, the `AlwaysMixAll` toggle, and one app picker per list (installed apps are enumerated through `LSApplicationWorkspace` and toggled on and off). Each list row shows its current entry count, updated as apps are toggled. The prefs file is created on the first change and is not part of the package, so upgrading never overwrites an existing configuration.
 
 `ForcePlayback` exists for apps that never use the microphone: keeping them on a record-capable session makes iOS rebuild the input path on launch and teardown, which is audible as a short glitch in the playing music.
 

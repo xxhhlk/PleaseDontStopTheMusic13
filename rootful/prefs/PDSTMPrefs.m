@@ -1,48 +1,14 @@
+#import <Preferences/PSListController.h>
+#import <Preferences/PSSpecifier.h>
+#import <Preferences/PSTableCell.h>
 #import <UIKit/UIKit.h>
 #import <objc/runtime.h>
 #import <dlfcn.h>
 
-// Settings ships Preferences.framework, but recent SDKs no longer include it, so
-// the classes are declared here and resolved at load time. Declaring them
-// without ivars keeps the subclass layout independent of the real one; the
-// specifier cache lives in an associated object instead of the _specifiers ivar.
-
 static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.xxhhlk.pdstm.plist";
-
-@interface PSSpecifier : NSObject
-+ (instancetype)preferenceSpecifierNamed:(NSString *)name
-                                  target:(id)target
-                                     set:(SEL)set
-                                     get:(SEL)get
-                                  detail:(Class)detail
-                                    cell:(NSInteger)cell
-                                    edit:(Class)edit;
-+ (instancetype)groupSpecifierWithName:(NSString *)name;
-- (void)setProperty:(id)property forKey:(NSString *)key;
-- (id)propertyForKey:(NSString *)key;
-@property (nonatomic) SEL buttonAction;
-@end
-
-@interface PSListController : UIViewController
-- (NSArray *)specifiers;
-- (void)reloadSpecifiers;
-- (PSSpecifier *)specifier;
-@end
-
-// PSCellType values from Preferences/PSTableCell.h.
-enum { PSGroupCell = 0, PSLinkCell = 1, PSSwitchCell = 6, PSButtonCell = 13 };
-
-@interface LSApplicationProxy : NSObject
-- (NSString *)localizedName;
-- (NSString *)applicationIdentifier;
-- (NSString *)applicationType;
-- (NSURL *)bundleURL;
-@end
-
-@interface LSApplicationWorkspace : NSObject
-+ (instancetype)defaultWorkspace;
-- (NSArray *)allInstalledApplications;
-@end
+// Posted by the app-list pane whenever a list changes, so the root pane can
+// update the matching "N selected" row without rebuilding the whole table.
+static NSString *const kListDidChange = @"PDSTMListDidChange";
 
 #pragma mark - helpers
 
@@ -65,6 +31,18 @@ static void PDSTMSetList(NSString *key, NSArray *list) {
     d[key] = list;
     PDSTMWritePrefs(d);
 }
+
+@interface LSApplicationProxy : NSObject
+- (NSString *)localizedName;
+- (NSString *)applicationIdentifier;
+- (NSString *)applicationType;
+- (NSURL *)bundleURL;
+@end
+
+@interface LSApplicationWorkspace : NSObject
++ (instancetype)defaultWorkspace;
+- (NSArray *)allInstalledApplications;
+@end
 
 static NSArray *PDSTMInstalledApps(void) {
     static NSArray *cached = nil;
@@ -104,21 +82,6 @@ static NSArray *PDSTMInstalledApps(void) {
     return cached;
 }
 
-static NSMutableArray *PDSTMSpecifierCache(id controller) {
-    NSMutableArray *cache = objc_getAssociatedObject(controller, "PDSTMSpecifierCache");
-    if (!cache) {
-        cache = [NSMutableArray array];
-        objc_setAssociatedObject(controller, "PDSTMSpecifierCache", cache,
-                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-    }
-    return cache;
-}
-
-static void PDSTMResetSpecifierCache(id controller) {
-    objc_setAssociatedObject(controller, "PDSTMSpecifierCache", nil,
-                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-}
-
 #pragma mark - Root pane
 
 @interface PDSTMRootListController : PSListController
@@ -148,10 +111,22 @@ static void PDSTMResetSpecifierCache(id controller) {
                                                          cell:PSLinkCell
                                                          edit:nil];
     [spec setProperty:key forKey:@"listKey"];
-    NSUInteger count = PDSTMList(key).count;
-    [spec setProperty:count ? [NSString stringWithFormat:@"%lu", (unsigned long)count] : nil
-               forKey:@"cellDetailTextLabel"];
     return spec;
+}
+
+// Keeps the "N selected" label on the list rows in sync with what the child
+// panes write. Only the affected row is reloaded, so the table does not jump.
+- (void)refreshListCountsFor:(NSString *)changedKey {
+    for (PSSpecifier *spec in _specifiers) {
+        NSString *key = [spec propertyForKey:@"listKey"];
+        if (!key) continue;
+        NSUInteger count = PDSTMList(key).count;
+        [spec setProperty:count ? [NSString stringWithFormat:@"%lu", (unsigned long)count] : nil
+                    forKey:@"cellDetailTextLabel"];
+        if (changedKey && [key isEqualToString:changedKey]) {
+            [self reloadSpecifier:spec animated:NO];
+        }
+    }
 }
 
 - (id)getSwitch:(PSSpecifier *)spec {
@@ -165,40 +140,68 @@ static void PDSTMResetSpecifierCache(id controller) {
     PDSTMWritePrefs(d);
 }
 
+- (void)viewDidLoad {
+    [super viewDidLoad];
+    // A notification observer is used instead of viewWillAppear because the
+    // pushed child pane can keep the parent from being asked to appear again.
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(listDidChange:)
+                                                 name:kListDidChange
+                                               object:nil];
+}
+
+- (void)dealloc {
+    [[NSNotificationCenter defaultCenter] removeObserver:self];
+}
+
+- (void)listDidChange:(NSNotification *)note {
+    NSString *key = note.object;
+    [self refreshListCountsFor:key];
+}
+
 - (void)viewWillAppear:(BOOL)animated {
     [super viewWillAppear:animated];
-    // List counts and the per-app switches are edited on the child panes, so the
-    // root pane has to rebuild itself when it comes back.
-    PDSTMResetSpecifierCache(self);
-    [self reloadSpecifiers];
+    [self refreshListCountsFor:nil];
 }
 
 - (NSArray *)specifiers {
-    NSMutableArray *specs = PDSTMSpecifierCache(self);
-    if (specs.count) return specs;
+    if (!_specifiers) {
+        NSMutableArray *specs = [NSMutableArray array];
 
-    PSSpecifier *general = [PSSpecifier groupSpecifierWithName:@"通用"];
-    [general setProperty:@"正在播放音乐时启动的其它 App 会被降级为可混音源，音乐不再被暂停。改动在目标 App 下次冷启动时生效。"
-                  forKey:@"footerText"];
-    [specs addObject:general];
-    [specs addObject:[self switchSpecifierNamed:@"启用" key:@"Enabled" fallback:YES]];
-    [specs addObject:[self switchSpecifierNamed:@"写入调试日志" key:@"DebugLog" fallback:NO]];
+        PSSpecifier *general = [PSSpecifier groupSpecifierWithName:@"通用"];
+        [general setProperty:@"正在播放音乐时启动的其它 App 会被降级为可混音源，音乐不再被暂停。改动在目标 App 下次冷启动时生效。"
+                      forKey:@"footerText"];
+        [specs addObject:general];
+        [specs addObject:[self switchSpecifierNamed:@"启用" key:@"Enabled" fallback:YES]];
+        [specs addObject:[self switchSpecifierNamed:@"写入调试日志" key:@"DebugLog" fallback:NO]];
 
-    PSSpecifier *rules = [PSSpecifier groupSpecifierWithName:@"规则"];
-    [rules setProperty:@"开启后除“永不处理”里的 App 外，全部降级为可混音源。"
-                forKey:@"footerText"];
-    [specs addObject:rules];
-    [specs addObject:[self switchSpecifierNamed:@"所有 App 都降级" key:@"AlwaysMixAll" fallback:NO]];
+        PSSpecifier *rules = [PSSpecifier groupSpecifierWithName:@"规则"];
+        [rules setProperty:@"开启后除“永不处理”里的 App 外，全部降级为可混音源。"
+                    forKey:@"footerText"];
+        [specs addObject:rules];
+        [specs addObject:[self switchSpecifierNamed:@"所有 App 都降级" key:@"AlwaysMixAll" fallback:NO]];
 
-    PSSpecifier *lists = [PSSpecifier groupSpecifierWithName:@"应用列表"];
-    [lists setProperty:@"始终降级：无论是否正在播放都会降级。\n改成纯播放：把录音会话改成播放会话，不开麦克风，避免启动和退出时的卡顿。\n永不处理：完全跳过这些 App。"
-                forKey:@"footerText"];
-    [specs addObject:lists];
-    [specs addObject:[self listSpecifierNamed:@"始终降级" key:@"AlwaysMix"]];
-    [specs addObject:[self listSpecifierNamed:@"改成纯播放" key:@"ForcePlayback"]];
-    [specs addObject:[self listSpecifierNamed:@"永不处理" key:@"NeverMix"]];
+        PSSpecifier *lists = [PSSpecifier groupSpecifierWithName:@"应用列表"];
+        [lists setProperty:@"始终降级：无论是否正在播放都会降级。\n改成纯播放：把录音会话改成播放会话，不开麦克风，避免启动和退出时的卡顿。\n永不处理：完全跳过这些 App。"
+                    forKey:@"footerText"];
+        [specs addObject:lists];
+        [specs addObject:[self listSpecifierNamed:@"始终降级" key:@"AlwaysMix"]];
+        [specs addObject:[self listSpecifierNamed:@"改成纯播放" key:@"ForcePlayback"]];
+        [specs addObject:[self listSpecifierNamed:@"永不处理" key:@"NeverMix"]];
 
-    return specs;
+        _specifiers = specs;
+    }
+    // Counts live in the properties, so they are refreshed on every read; this
+    // also covers the first appearance, where viewWillAppear runs before the
+    // specifiers exist.
+    for (PSSpecifier *spec in _specifiers) {
+        NSString *key = [spec propertyForKey:@"listKey"];
+        if (!key) continue;
+        NSUInteger count = PDSTMList(key).count;
+        [spec setProperty:count ? [NSString stringWithFormat:@"%lu", (unsigned long)count] : nil
+                    forKey:@"cellDetailTextLabel"];
+    }
+    return _specifiers;
 }
 
 @end
@@ -211,51 +214,65 @@ static void PDSTMResetSpecifierCache(id controller) {
 @implementation PDSTMAppListController
 
 - (NSString *)listKey {
-    return [[self specifier] propertyForKey:@"listKey"];
+    return [self.specifier propertyForKey:@"listKey"];
+}
+
+// The group header doubles as the selection counter for this list.
+- (void)updateCountHeader {
+    NSString *title = [NSString stringWithFormat:@"已选 %lu 项", (unsigned long)PDSTMList([self listKey]).count];
+    for (PSSpecifier *spec in _specifiers) {
+        if (![spec propertyForKey:@"PDSTMGroupTag"]) continue;
+        spec.name = title;
+        [self reloadSpecifier:spec animated:NO];
+        break;
+    }
 }
 
 - (NSArray *)specifiers {
-    NSMutableArray *specs = PDSTMSpecifierCache(self);
-    if (specs.count) return specs;
+    if (!_specifiers) {
+        NSArray *apps = PDSTMInstalledApps();
 
-    NSString *key = [self listKey];
-    NSArray *apps = PDSTMInstalledApps();
+        NSMutableArray *specs = [NSMutableArray array];
+        if (!apps.count) {
+            PSSpecifier *empty = [PSSpecifier groupSpecifierWithName:@""];
+            [empty setProperty:@"无法枚举已安装的 App。" forKey:@"footerText"];
+            [specs addObject:empty];
+        } else {
+            // The name is set here rather than in updateCountHeader: the array
+            // does not exist yet at this point, so a lookup by tag would find
+            // nothing and the row would render without a title.
+            NSString *title = [NSString stringWithFormat:@"已选 %lu 项", (unsigned long)PDSTMList([self listKey]).count];
+            PSSpecifier *group = [PSSpecifier groupSpecifierWithName:title];
+            [group setProperty:@"选中即写入名单，取消即移除。" forKey:@"footerText"];
+            [group setProperty:@"countGroup" forKey:@"PDSTMGroupTag"];
+            [specs addObject:group];
 
-    if (!apps.count) {
-        PSSpecifier *empty = [PSSpecifier groupSpecifierWithName:@""];
-        [empty setProperty:@"无法枚举已安装的 App。" forKey:@"footerText"];
-        [specs addObject:empty];
-        return specs;
+            for (NSDictionary *app in apps) {
+                PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:app[@"name"]
+                                                                   target:self
+                                                                      set:@selector(setApp:forSpecifier:)
+                                                                      get:@selector(getApp:)
+                                                                   detail:nil
+                                                                     cell:PSSwitchCell
+                                                                     edit:nil];
+                [spec setProperty:app[@"id"] forKey:@"bundleID"];
+                [specs addObject:spec];
+            }
+
+            PSSpecifier *clear = [PSSpecifier preferenceSpecifierNamed:@"清空名单"
+                                                                target:self
+                                                                   set:nil
+                                                                   get:nil
+                                                                detail:nil
+                                                                  cell:PSButtonCell
+                                                                  edit:nil];
+            clear.buttonAction = @selector(clearList);
+            [specs addObject:clear];
+        }
+
+        _specifiers = specs;
     }
-
-    PSSpecifier *group = [PSSpecifier groupSpecifierWithName:
-                          [NSString stringWithFormat:@"已选 %lu 项", (unsigned long)PDSTMList(key).count]];
-    [group setProperty:@"选中即写入名单，取消即移除。" forKey:@"footerText"];
-    [specs addObject:group];
-
-    for (NSDictionary *app in apps) {
-        PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:app[@"name"]
-                                                           target:self
-                                                              set:@selector(setApp:forSpecifier:)
-                                                              get:@selector(getApp:)
-                                                           detail:nil
-                                                             cell:PSSwitchCell
-                                                             edit:nil];
-        [spec setProperty:app[@"id"] forKey:@"bundleID"];
-        [specs addObject:spec];
-    }
-
-    PSSpecifier *clear = [PSSpecifier preferenceSpecifierNamed:@"清空名单"
-                                                        target:self
-                                                           set:nil
-                                                           get:nil
-                                                        detail:nil
-                                                          cell:PSButtonCell
-                                                          edit:nil];
-    clear.buttonAction = @selector(clearList);
-    [specs addObject:clear];
-
-    return specs;
+    return _specifiers;
 }
 
 - (id)getApp:(PSSpecifier *)spec {
@@ -271,12 +288,21 @@ static void PDSTMResetSpecifierCache(id controller) {
         [list removeObject:identifier];
     }
     PDSTMSetList([self listKey], list);
+    [self updateCountHeader];
+    [[NSNotificationCenter defaultCenter] postNotificationName:kListDidChange
+                                                        object:[self listKey]];
 }
 
 - (void)clearList {
     PDSTMSetList([self listKey], @[]);
-    PDSTMResetSpecifierCache(self);
+    for (PSSpecifier *spec in _specifiers) {
+        if (![spec propertyForKey:@"bundleID"]) continue;
+        [spec setProperty:@NO forKey:@"PDSTMValue"];
+    }
+    [self updateCountHeader];
     [self reloadSpecifiers];
+    [[NSNotificationCenter defaultCenter] postNotificationName:kListDidChange
+                                                        object:[self listKey]];
 }
 
 @end

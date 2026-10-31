@@ -10,6 +10,64 @@ permissions:
   contents: write
 
 jobs:
+  # The iOS 13 package needs the pre-iOS-14 arm64e ABI, which only a clang 11
+  # toolchain produces, so the macOS runner cannot build it. That job runs on
+  # Linux with Theos plus the L1ghtmann clang 11 toolchain instead.
+  rootful-ios13:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq fakeroot dpkg-dev xz-utils zlib1g-dev \
+            libssl-dev make git curl perl file
+          curl -fL -o /tmp/ldid https://github.com/ProcursusTeam/ldid/releases/download/v2.1.5-procursus7/ldid_linux_x86_64
+          chmod +x /tmp/ldid && sudo mv /tmp/ldid /usr/local/bin/ldid
+
+      - name: Setup Theos
+        run: |
+          export THEOS=${{ github.workspace }}/theos
+          echo "THEOS=$THEOS" >> $GITHUB_ENV
+          git clone --recursive --depth 1 https://github.com/theos/theos.git $THEOS
+
+      - name: Add iPhoneOS13.7 SDK
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git "$RUNNER_TEMP/theos-sdks"
+          git -C "$RUNNER_TEMP/theos-sdks" sparse-checkout set iPhoneOS13.7.sdk
+          cp -R "$RUNNER_TEMP/theos-sdks/iPhoneOS13.7.sdk" "$THEOS/sdks/"
+
+      - name: Install clang 11 iOS toolchain
+        run: |
+          curl -fL -o /tmp/tc.tar.xz https://github.com/L1ghtmann/llvm-project/releases/download/main-update_3-eabca92/iOSToolchain-x86_64.tar.xz
+          tar -xf /tmp/tc.tar.xz -C "$THEOS"
+          "$THEOS/toolchain/linux/iphone/bin/clang" --version | head -1
+
+      - name: Build rootful
+        run: make -C rootful clean package FINALPACKAGE=1 -j1
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p artifacts
+          cp rootful/packages/*.deb artifacts/ 2>/dev/null || true
+          echo "=== artifacts ==="; ls -la artifacts/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: AudioMix-rootful-ios13
+          path: artifacts/*
+
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+
+  # The other variants are built against the current SDK on macOS.
   build:
     runs-on: macos-latest
 
@@ -30,16 +88,6 @@ jobs:
           echo "SDK_PATH=$SDK_PATH" >> $GITHUB_ENV
           echo "SDK setup complete: iPhoneOS${SDK_VER}.sdk"
 
-      # The rootful package targets iOS 13 and links Preferences.framework, which
-      # current SDKs no longer ship, so the iOS 13.7 SDK has to be present as well.
-      - name: Add iPhoneOS13.7 SDK
-        run: |
-          git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git "$RUNNER_TEMP/theos-sdks"
-          git -C "$RUNNER_TEMP/theos-sdks" sparse-checkout set iPhoneOS13.7.sdk
-          rm -rf "$THEOS/sdks/iPhoneOS13.7.sdk"
-          cp -R "$RUNNER_TEMP/theos-sdks/iPhoneOS13.7.sdk" "$THEOS/sdks/"
-          ls -d "$THEOS/sdks/"*
-
       - name: Setup roothide Theos
         run: |
           ROOTHIDE_THEOS=${{ github.workspace }}/theos-roothide
@@ -48,8 +96,10 @@ jobs:
           mkdir -p "$ROOTHIDE_THEOS/sdks"
           ln -s "$SDK_PATH" "$ROOTHIDE_THEOS/sdks/iPhoneOS${SDK_VERSION}.sdk"
 
-      - name: Build rootless / rootful / jailed
-        run: make clean all
+      - name: Build rootless / jailed
+        run: |
+          make -C rootless clean package FINALPACKAGE=1
+          make -C jailed clean all
 
       - name: Build roothide (arm64e)
         run: |
@@ -61,7 +111,6 @@ jobs:
         run: |
           mkdir -p artifacts
           cp rootless/packages/*.deb   artifacts/ 2>/dev/null || true
-          cp rootful/packages/*.deb    artifacts/ 2>/dev/null || true
           cp roothide/packages/*.deb   artifacts/ 2>/dev/null || true
           cp jailed/PleaseDontStopTheMusic.dylib artifacts/PleaseDontStopTheMusic_jailed.dylib 2>/dev/null || true
           echo "=== artifacts ==="; ls -la artifacts/
@@ -69,7 +118,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: AudioMix-all
+          name: AudioMix-other
           path: artifacts/*
 
       - name: Release

@@ -12,12 +12,26 @@
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>PleaseDontStopTheMusic</string>
+	<key>CFBundleIcons</key>
+	<dict>
+		<key>CFBundlePrimaryIcon</key>
+		<dict>
+			<key>CFBundleIconFiles</key>
+			<array>
+				<string>Icon-29</string>
+			</array>
+		</dict>
+	</dict>
+	<key>CFBundleIconFiles</key>
+	<array>
+		<string>Icon-29</string>
+	</array>
 	<key>CFBundlePackageType</key>
 	<string>BNDL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>2.6.4</string>
+	<string>2.6.5</string>
 	<key>CFBundleVersion</key>
-	<string>2.6.4</string>
+	<string>2.6.5</string>
 	<key>NSPrincipalClass</key>
 	<string>PDSTMRootListController</string>
 </dict>
