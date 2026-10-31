@@ -6,6 +6,8 @@ An iOS tweak that allows multiple audio sources to play simultaneously by preven
 
 If you find this project useful and would like to support development, donations are appreciated.
 
+> The address below belongs to the **upstream author** ([mikey820](https://github.com/mikey820)), not to this fork.
+
 ### Litecoin
 **Network:** Litecoin (LTC)  
 **Address:** `ltc1qaz2zqcc5usl4ueg7w5m8kqcmvrfqurpn6wqyfa`
@@ -65,6 +67,21 @@ This build targets `firmware >= 13.0` (rootful, arm64). On top of the upstream h
 | `DebugLog` | bool | write `/var/mobile/Library/Logs/PDSTM.log` |
 
 `ForcePlayback` exists for apps that never use the microphone: keeping them on a record-capable session makes iOS rebuild the input path on launch and teardown, which is audible as a short glitch in the playing music.
+
+Example configuration — UU Remote keeps interrupting playback without ever producing sound, and Microsoft Remote Desktop opens a record session it never uses, so it glitches the music on launch and exit:
+
+```xml
+<dict>
+	<key>AlwaysMix</key>
+	<array>
+		<string>com.netease.uuremote</string>
+	</array>
+	<key>ForcePlayback</key>
+	<array>
+		<string>com.microsoft.rdc.ios</string>
+	</array>
+</dict>
+```
 
 Changes apply on the next cold start of the target app; no respring required.
 
