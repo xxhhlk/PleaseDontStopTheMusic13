@@ -7,7 +7,7 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = PleaseDontStopTheMusic
 
 PleaseDontStopTheMusic_FILES = ../Tweak.x
-PleaseDontStopTheMusic_CFLAGS = -fobjc-arc
+PleaseDontStopTheMusic_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
 PleaseDontStopTheMusic_FRAMEWORKS = AVFoundation AudioToolbox MediaPlayer
 PleaseDontStopTheMusic_LDFLAGS = -Wl,-segalign,4000
 

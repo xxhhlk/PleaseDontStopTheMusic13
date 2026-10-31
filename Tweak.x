@@ -278,6 +278,10 @@ static BOOL PDSTMForcePlaybackForBundle(void) {
     return gForcePlayback && [gForcePlayback containsObject:gBundleID];
 }
 
+// AVAudioSessionCategoryOptionAllowBluetooth was renamed to ...AllowBluetoothHFP
+// in newer SDKs and is deprecated since iOS 8. The raw value never changed.
+static const AVAudioSessionCategoryOptions kPDSTMAllowBluetooth = (1 << 2);
+
 // Applies the tweak's policy to a requested category/options pair.
 static void PDSTMApplyPolicy(NSString **category, AVAudioSessionCategoryOptions *options) {
     if ([*category isEqualToString:AVAudioSessionCategorySoloAmbient]) {
@@ -287,7 +291,7 @@ static void PDSTMApplyPolicy(NSString **category, AVAudioSessionCategoryOptions 
         && [*category isEqualToString:AVAudioSessionCategoryPlayAndRecord]) {
         *category = AVAudioSessionCategoryPlayback;
         *options &= ~(AVAudioSessionCategoryOptionDefaultToSpeaker
-                      | AVAudioSessionCategoryOptionAllowBluetooth);
+                      | kPDSTMAllowBluetooth);
     }
     *options |= AVAudioSessionCategoryOptionMixWithOthers;
 }
