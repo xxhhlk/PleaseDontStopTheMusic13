@@ -3,6 +3,7 @@
 #import <notify.h>
 #import <substrate.h>
 #import <dlfcn.h>
+#import <unistd.h>
 
 // PleaseDontStopTheMusic — iOS 13 build
 //
@@ -43,6 +44,7 @@ static BOOL      gAlwaysMixAll = NO;
 static BOOL      gDebug        = YES;
 static NSArray  *gAlwaysMix    = nil;
 static NSArray  *gNeverMix     = nil;
+static NSArray  *gForcePlayback = nil;
 
 static __thread BOOL tInHook = NO;
 
@@ -109,6 +111,8 @@ static void PDSTMLoadPrefs(void) {
     if ([v isKindOfClass:[NSArray class]]) gAlwaysMix = v;
     v = d[@"NeverMix"];
     if ([v isKindOfClass:[NSArray class]]) gNeverMix = v;
+    v = d[@"ForcePlayback"];
+    if ([v isKindOfClass:[NSArray class]]) gForcePlayback = v;
     v = d[@"AlwaysMixAll"];
     if ([v respondsToSelector:@selector(boolValue)]) gAlwaysMixAll = [v boolValue];
     v = d[@"DebugLog"];
@@ -150,6 +154,49 @@ static BOOL PDSTMMediaRemotePlayingCached(void) {
     if (now - lastCheck < 1.0) return lastResult;
     lastCheck = now;
     lastResult = PDSTMMediaRemotePlaying();
+    return lastResult;
+}
+
+// MediaRemote: MRMediaRemoteGetNowPlayingApplicationPID(queue, block)
+//
+// Whoever owns Now Playing must never be demoted to a mixable session: doing so
+// hands the lock screen / Control Center transport to someone else and the
+// "Now Playing" entry loses its track info. This is what kept happening to the
+// music app itself when a video was playing alongside it.
+typedef void (*PDSTMMRNowPlayingPIDFn)(dispatch_queue_t, void (^)(pid_t));
+
+static PDSTMMRNowPlayingPIDFn PDSTMNowPlayingPIDFn(void) {
+    static PDSTMMRNowPlayingPIDFn fn = NULL;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        void *h = dlopen("/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote",
+                         RTLD_LAZY);
+        if (h) fn = (PDSTMMRNowPlayingPIDFn)dlsym(h, "MRMediaRemoteGetNowPlayingApplicationPID");
+    });
+    return fn;
+}
+
+static BOOL PDSTMIsNowPlayingApp(void) {
+    PDSTMMRNowPlayingPIDFn fn = PDSTMNowPlayingPIDFn();
+    if (!fn) return NO;
+
+    __block pid_t pid = 0;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+    fn(dispatch_get_global_queue(QOS_CLASS_DEFAULT, 0), ^(pid_t p) {
+        pid = p;
+        dispatch_semaphore_signal(sem);
+    });
+    dispatch_semaphore_wait(sem, dispatch_time(DISPATCH_TIME_NOW, 10ull * NSEC_PER_MSEC));
+    return pid > 0 && pid == getpid();
+}
+
+static BOOL PDSTMIsNowPlayingAppCached(void) {
+    static NSTimeInterval lastCheck = 0;
+    static BOOL lastResult = NO;
+    NSTimeInterval now = [NSDate timeIntervalSinceReferenceDate];
+    if (now - lastCheck < 1.0) return lastResult;
+    lastCheck = now;
+    lastResult = PDSTMIsNowPlayingApp();
     return lastResult;
 }
 
@@ -195,6 +242,9 @@ static BOOL PDSTMShouldMix(void) {
     if (gNeverMix && [gNeverMix containsObject:gBundleID]) return NO;
     if (gAlwaysMix && [gAlwaysMix containsObject:gBundleID]) return YES;
     if (gAlwaysMixAll) return YES;
+    // The app that currently owns Now Playing keeps the primary session, so the
+    // lock screen / Control Center entry keeps its track info and controls.
+    if (PDSTMIsNowPlayingAppCached()) return NO;
     return PDSTMOtherAudioPlaying();
 }
 
@@ -221,21 +271,50 @@ static void PDSTMDarwinCallback(CFNotificationCenterRef c, void *obs, CFStringRe
     if ([(__bridge NSString *)name isEqualToString:kBegin]) PDSTMGoSecondary();
 }
 
+#pragma mark - policy
+
+static BOOL PDSTMForcePlaybackForBundle(void) {
+    return gForcePlayback && [gForcePlayback containsObject:gBundleID];
+}
+
+// Applies the tweak's policy to a requested category/options pair.
+static void PDSTMApplyPolicy(NSString **category, AVAudioSessionCategoryOptions *options) {
+    if ([*category isEqualToString:AVAudioSessionCategorySoloAmbient]) {
+        *category = AVAudioSessionCategoryAmbient;
+    }
+    if (PDSTMForcePlaybackForBundle()
+        && [*category isEqualToString:AVAudioSessionCategoryPlayAndRecord]) {
+        *category = AVAudioSessionCategoryPlayback;
+        *options &= ~(AVAudioSessionCategoryOptionDefaultToSpeaker
+                      | AVAudioSessionCategoryOptionAllowBluetooth);
+    }
+    *options |= AVAudioSessionCategoryOptionMixWithOthers;
+}
+
+// True when the live session still differs from what the policy wants.
+static BOOL PDSTMSessionNeedsRewrite(AVAudioSession *s) {
+    if (!(s.categoryOptions & AVAudioSessionCategoryOptionMixWithOthers)) return YES;
+    if (PDSTMForcePlaybackForBundle()
+        && [s.category isEqualToString:AVAudioSessionCategoryPlayAndRecord]) return YES;
+    return NO;
+}
+
 #pragma mark - AVAudioSession hooks
 
 %hook AVAudioSession
 
 - (BOOL)setCategory:(NSString *)category error:(NSError **)outError {
     if (!tInHook && PDSTMShouldMix()) {
-        PDSTMLog(@"setCategory:%@ error: -> forced mix", category);
-        tInHook = YES;
-        if ([category isEqualToString:AVAudioSessionCategorySoloAmbient]) {
-            BOOL r = %orig(AVAudioSessionCategoryAmbient, outError);
-            tInHook = NO;
-            return r;
+        NSString *eff = category;
+        AVAudioSessionCategoryOptions opts = 0;
+        PDSTMApplyPolicy(&eff, &opts);
+        if (PDSTMSessionAlreadyMixed(self, eff, nil, 0)) {
+            PDSTMLog(@"skip redundant setCategory:%@ error:", eff);
+            return YES;
         }
-        BOOL r = [self setCategory:category mode:AVAudioSessionModeDefault
-                           options:AVAudioSessionCategoryOptionMixWithOthers error:outError];
+        PDSTMLog(@"setCategory:%@ error: -> %@ opts=0x%lx", category, eff, (unsigned long)opts);
+        tInHook = YES;
+        BOOL r = [self setCategory:eff mode:AVAudioSessionModeDefault options:opts error:outError];
         tInHook = NO;
         return r;
     }
@@ -247,39 +326,51 @@ static void PDSTMDarwinCallback(CFNotificationCenterRef c, void *obs, CFStringRe
         PDSTMProbeLog(@"setCategory:mode:options:", category, options);
     }
     if (!tInHook && PDSTMShouldMix()) {
-        NSString *eff = [category isEqualToString:AVAudioSessionCategorySoloAmbient]
-                      ? AVAudioSessionCategoryAmbient : category;
+        NSString *eff = category;
+        AVAudioSessionCategoryOptions opts = options;
+        PDSTMApplyPolicy(&eff, &opts);
         if (PDSTMSessionAlreadyMixed(self, eff, mode, options)) {
             PDSTMLog(@"skip redundant setCategory:%@ mode:%@", eff, mode);
             return YES;
         }
-        PDSTMLog(@"setCategory:%@ mode:%@ options:0x%lx -> forced mix", category, mode, (unsigned long)options);
+        PDSTMLog(@"setCategory:%@ mode:%@ options:0x%lx -> %@ opts=0x%lx",
+                 category, mode, (unsigned long)options, eff, (unsigned long)opts);
         category = eff;
-        options |= AVAudioSessionCategoryOptionMixWithOthers;
+        options = opts;
     }
     return %orig;
 }
 
 - (BOOL)setCategory:(NSString *)category mode:(NSString *)mode routeSharingPolicy:(AVAudioSessionRouteSharingPolicy)policy options:(AVAudioSessionCategoryOptions)options error:(NSError **)outError {
     if (!tInHook && PDSTMShouldMix()) {
-        PDSTMLog(@"setCategory:%@ mode:%@ policy:%lu options:0x%lx -> forced mix", category, mode, (unsigned long)policy, (unsigned long)options);
-        if ([category isEqualToString:AVAudioSessionCategorySoloAmbient]) category = AVAudioSessionCategoryAmbient;
-        options |= AVAudioSessionCategoryOptionMixWithOthers;
+        NSString *eff = category;
+        AVAudioSessionCategoryOptions opts = options;
+        PDSTMApplyPolicy(&eff, &opts);
+        if (PDSTMSessionAlreadyMixed(self, eff, mode, options)) {
+            PDSTMLog(@"skip redundant setCategory:%@ policy:%lu", eff, (unsigned long)policy);
+            return YES;
+        }
+        PDSTMLog(@"setCategory:%@ mode:%@ policy:%lu options:0x%lx -> %@ opts=0x%lx",
+                 category, mode, (unsigned long)policy, (unsigned long)options, eff, (unsigned long)opts);
+        category = eff;
+        options = opts;
     }
     return %orig;
 }
 
 - (BOOL)setCategory:(NSString *)category withOptions:(AVAudioSessionCategoryOptions)options error:(NSError **)outError {
     if (!tInHook && PDSTMShouldMix()) {
-        NSString *eff = [category isEqualToString:AVAudioSessionCategorySoloAmbient]
-                      ? AVAudioSessionCategoryAmbient : category;
+        NSString *eff = category;
+        AVAudioSessionCategoryOptions opts = options;
+        PDSTMApplyPolicy(&eff, &opts);
         if (PDSTMSessionAlreadyMixed(self, eff, nil, options)) {
             PDSTMLog(@"skip redundant setCategory:%@ withOptions:0x%lx", eff, (unsigned long)options);
             return YES;
         }
-        PDSTMLog(@"setCategory:%@ withOptions:0x%lx -> forced mix", category, (unsigned long)options);
+        PDSTMLog(@"setCategory:%@ withOptions:0x%lx -> %@ opts=0x%lx",
+                 category, (unsigned long)options, eff, (unsigned long)opts);
         category = eff;
-        options |= AVAudioSessionCategoryOptionMixWithOthers;
+        options = opts;
     }
     return %orig;
 }
@@ -288,14 +379,14 @@ static void PDSTMDarwinCallback(CFNotificationCenterRef c, void *obs, CFStringRe
     gSessionActive = active;
     if (active) PDSTMProbeLog(@"setActive:", self.category, self.categoryOptions);
     if (gIsVideoApp && active && self.isOtherAudioPlaying) PDSTMPost(kBegin);
-    if (!tInHook && active && PDSTMShouldMix()
-        && !(self.categoryOptions & AVAudioSessionCategoryOptionMixWithOthers)) {
+    if (!tInHook && active && PDSTMShouldMix() && PDSTMSessionNeedsRewrite(self)) {
         NSString *cat = self.category;
-        PDSTMLog(@"setActive:YES cat=%@ options:0x%lx -> forced mix", cat, (unsigned long)self.categoryOptions);
-        if ([cat isEqualToString:AVAudioSessionCategorySoloAmbient]) cat = AVAudioSessionCategoryAmbient;
+        AVAudioSessionCategoryOptions opts = self.categoryOptions;
+        PDSTMApplyPolicy(&cat, &opts);
+        PDSTMLog(@"setActive:YES cat=%@ options:0x%lx -> %@ opts=0x%lx",
+                 self.category, (unsigned long)self.categoryOptions, cat, (unsigned long)opts);
         tInHook = YES;
-        [self setCategory:cat mode:self.mode
-                  options:(self.categoryOptions | AVAudioSessionCategoryOptionMixWithOthers) error:nil];
+        [self setCategory:cat mode:self.mode options:opts error:nil];
         tInHook = NO;
     }
     return %orig;
@@ -305,14 +396,14 @@ static void PDSTMDarwinCallback(CFNotificationCenterRef c, void *obs, CFStringRe
     gSessionActive = active;
     if (active) PDSTMProbeLog(@"setActive:withOptions:", self.category, self.categoryOptions);
     if (gIsVideoApp && active && self.isOtherAudioPlaying) PDSTMPost(kBegin);
-    if (!tInHook && active && PDSTMShouldMix()
-        && !(self.categoryOptions & AVAudioSessionCategoryOptionMixWithOthers)) {
+    if (!tInHook && active && PDSTMShouldMix() && PDSTMSessionNeedsRewrite(self)) {
         NSString *cat = self.category;
-        PDSTMLog(@"setActive:YES options:0x%lx cat=%@ -> forced mix", (unsigned long)options, cat);
-        if ([cat isEqualToString:AVAudioSessionCategorySoloAmbient]) cat = AVAudioSessionCategoryAmbient;
+        AVAudioSessionCategoryOptions opts = self.categoryOptions;
+        PDSTMApplyPolicy(&cat, &opts);
+        PDSTMLog(@"setActive:withOptions:0x%lx cat=%@ -> %@ opts=0x%lx",
+                 (unsigned long)options, self.category, cat, (unsigned long)opts);
         tInHook = YES;
-        [self setCategory:cat mode:self.mode
-                  options:(self.categoryOptions | AVAudioSessionCategoryOptionMixWithOthers) error:nil];
+        [self setCategory:cat mode:self.mode options:opts error:nil];
         tInHook = NO;
     }
     return %orig;
@@ -386,21 +477,21 @@ static void PDSTMEnsureMixable(NSString *why) {
     AVAudioSession *probe = [AVAudioSession sharedInstance];
     BOOL other = probe.isOtherAudioPlaying;
     BOOL hint = probe.secondaryAudioShouldBeSilencedHint;
-    BOOL mr = PDSTMMediaRemotePlayingCached();
+    BOOL mr = (other || hint) ? YES : PDSTMMediaRemotePlayingCached();
     BOOL mix = PDSTMShouldMix();
     PDSTMLog(@"%@ probe other=%d silencedHint=%d mr=%d mix=%d cat=%@", why, other, hint, mr, mix, probe.category);
     if (!mix) return;
     AVAudioSession *s = probe;
-    if (s.categoryOptions & AVAudioSessionCategoryOptionMixWithOthers) {
+    if (!PDSTMSessionNeedsRewrite(s)) {
         [s setActive:YES error:nil];
         return;
     }
     NSString *cat = s.category ?: AVAudioSessionCategoryAmbient;
-    if ([cat isEqualToString:AVAudioSessionCategorySoloAmbient]) cat = AVAudioSessionCategoryAmbient;
-    PDSTMLog(@"%@ -> pre-mix cat=%@ opts=0x%lx", why, cat, (unsigned long)s.categoryOptions);
+    AVAudioSessionCategoryOptions opts = s.categoryOptions;
+    PDSTMApplyPolicy(&cat, &opts);
+    PDSTMLog(@"%@ -> rewrite cat=%@ opts=0x%lx", why, cat, (unsigned long)opts);
     tInHook = YES;
-    [s setCategory:cat mode:s.mode
-           options:(s.categoryOptions | AVAudioSessionCategoryOptionMixWithOthers) error:nil];
+    [s setCategory:cat mode:s.mode options:opts error:nil];
     [s setActive:YES error:nil];
     tInHook = NO;
 }
@@ -470,6 +561,7 @@ static void PDSTMInstallToolboxHooks(void) {
     PDSTMInstallLegacyHooks();
     PDSTMInstallToolboxHooks();
 
-    PDSTMLog(@"loaded (video=%d alwaysMixAll=%d alwaysMix=%@ neverMix=%@)",
-             gIsVideoApp, gAlwaysMixAll, gAlwaysMix ?: @[], gNeverMix ?: @[]);
+    PDSTMLog(@"loaded (video=%d alwaysMixAll=%d alwaysMix=%@ neverMix=%@ forcePlayback=%@ nowPlayingGuard=%d)",
+             gIsVideoApp, gAlwaysMixAll, gAlwaysMix ?: @[], gNeverMix ?: @[], gForcePlayback ?: @[],
+             PDSTMNowPlayingPIDFn() != NULL);
 }
