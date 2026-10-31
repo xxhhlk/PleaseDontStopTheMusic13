@@ -1,5 +1,6 @@
 #import <AVFoundation/AVFoundation.h>
 #import <AudioToolbox/AudioToolbox.h>
+#import <MediaPlayer/MediaPlayer.h>
 #import <notify.h>
 #import <substrate.h>
 #import <dlfcn.h>
@@ -407,6 +408,35 @@ static BOOL PDSTMSessionNeedsRewrite(AVAudioSession *s) {
         tInHook = NO;
     }
     return %orig;
+}
+
+%end
+
+#pragma mark - Now Playing suppression
+//
+// A demoted app is a secondary audio source, but it can still claim the lock
+// screen / Control Center entry by writing to MPNowPlayingInfoCenter. Video apps
+// that publish their own now-playing metadata do exactly that, which pushes the
+// music app out of the controller even though its session is still primary.
+// Anything the tweak has demoted is therefore not allowed to publish now-playing
+// metadata while other audio is playing.
+
+%hook MPNowPlayingInfoCenter
+
+- (void)setNowPlayingInfo:(NSDictionary *)nowPlayingInfo {
+    if (PDSTMShouldMix()) {
+        PDSTMLog(@"suppress setNowPlayingInfo (%lu keys)", (unsigned long)nowPlayingInfo.count);
+        return;
+    }
+    %orig;
+}
+
+- (void)setPlaybackState:(MPNowPlayingPlaybackState)state {
+    if (PDSTMShouldMix()) {
+        PDSTMLog(@"suppress setPlaybackState(%lu)", (unsigned long)state);
+        return;
+    }
+    %orig;
 }
 
 %end

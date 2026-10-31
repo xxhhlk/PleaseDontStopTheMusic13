@@ -46,19 +46,25 @@ Crucially, it does **not** force mixing on whichever app is the primary music so
 
 ### iOS 13 build
 
-This fork targets `firmware >= 13.0` (rootful, arm64). On top of the upstream hooks it adds:
+Fork: <https://github.com/xxhhlk/PleaseDontStopTheMusic13> (upstream: `mikey820/PleaseDontStopTheMusic`).
+
+This build targets `firmware >= 13.0` (rootful, arm64). On top of the upstream hooks it adds:
 
 - **AudioUnit layer** — `AudioUnitInitialize`, `AudioOutputUnitStart` and `AUGraphStart` are hooked, and the session is made mixable *before* the unit starts. Apps that never touch `AVAudioSession` (UU Remote, for example) activate the session inside AudioToolbox; without this hook they still interrupt playback.
 - **Legacy AudioSession C API** — `AudioSessionSetActive` / `AudioSessionSetProperty` are hooked and `kAudioSessionProperty_OverrideCategoryMixWithOthers` is forced.
-- **Detection** — `isOtherAudioPlaying`, then `secondaryAudioShouldBeSilencedHint`, then a cached `MRMediaRemoteGetNowPlayingApplicationIsPlaying` query (MediaRemote private framework, 50 ms cap).
+- **Detection** — `isOtherAudioPlaying`, then `secondaryAudioShouldBeSilencedHint`, then a cached `MRMediaRemoteGetNowPlayingApplicationIsPlaying` query (MediaRemote private framework, 10 ms cap).
+- **Now Playing ownership** — the process that currently owns Now Playing is never demoted, and a demoted app cannot publish now-playing metadata (`MPNowPlayingInfoCenter` writes are dropped while other audio is playing). The lock screen / Control Center entry therefore stays with the music app while a video plays alongside it, including across track changes and scrubbing.
 - **Per-app overrides** — `/var/mobile/Library/Preferences/com.xxhhlk.pdstm.plist`:
 
 | Key | Type | Meaning |
 | --- | --- | --- |
 | `AlwaysMix` | array | bundle ids that are always demoted to mixing |
 | `NeverMix` | array | bundle ids that are never touched |
+| `ForcePlayback` | array | bundle ids whose `PlayAndRecord` session is rewritten to `Playback` (no microphone) |
 | `AlwaysMixAll` | bool | demote every app except `NeverMix` |
 | `DebugLog` | bool | write `/var/mobile/Library/Logs/PDSTM.log` |
+
+`ForcePlayback` exists for apps that never use the microphone: keeping them on a record-capable session makes iOS rebuild the input path on launch and teardown, which is audible as a short glitch in the playing music.
 
 Changes apply on the next cold start of the target app; no respring required.
 
