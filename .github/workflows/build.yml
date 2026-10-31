@@ -41,8 +41,10 @@ jobs:
 
       - name: Install clang 11 iOS toolchain
         run: |
+          # test-210562a is the clang 11.1 build; the newer tags ship clang 19,
+          # which cannot emit the pre-iOS-14 arm64e ABI.
           # The archive contains linux/iphone/..., so it unpacks into toolchain/.
-          curl -fL -o /tmp/tc.tar.xz https://github.com/L1ghtmann/llvm-project/releases/download/main-update_3-eabca92/iOSToolchain-x86_64.tar.xz
+          curl -fL -o /tmp/tc.tar.xz https://github.com/L1ghtmann/llvm-project/releases/download/test-210562a/iOSToolchain-x86_64.tar.xz
           mkdir -p "$THEOS/toolchain"
           tar -xf /tmp/tc.tar.xz -C "$THEOS/toolchain"
           "$THEOS/toolchain/linux/iphone/bin/clang" --version | head -1
