@@ -4,3 +4,9 @@
 *.deb
 *.dylib
 .DS_Store
+_out/
+_device_prefs.plist
+build_wsl.sh
+inspect.sh
+mk_testload.sh
+tc_*.sh

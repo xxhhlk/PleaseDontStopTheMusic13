@@ -44,6 +44,24 @@ Crucially, it does **not** force mixing on whichever app is the primary music so
 
 `SoloAmbient` sessions (which cannot mix) are transparently swapped to `Ambient` when another app is playing, so they no longer silence your music.
 
+### iOS 13 build
+
+This fork targets `firmware >= 13.0` (rootful, arm64). On top of the upstream hooks it adds:
+
+- **AudioUnit layer** — `AudioUnitInitialize`, `AudioOutputUnitStart` and `AUGraphStart` are hooked, and the session is made mixable *before* the unit starts. Apps that never touch `AVAudioSession` (UU Remote, for example) activate the session inside AudioToolbox; without this hook they still interrupt playback.
+- **Legacy AudioSession C API** — `AudioSessionSetActive` / `AudioSessionSetProperty` are hooked and `kAudioSessionProperty_OverrideCategoryMixWithOthers` is forced.
+- **Detection** — `isOtherAudioPlaying`, then `secondaryAudioShouldBeSilencedHint`, then a cached `MRMediaRemoteGetNowPlayingApplicationIsPlaying` query (MediaRemote private framework, 50 ms cap).
+- **Per-app overrides** — `/var/mobile/Library/Preferences/com.xxhhlk.pdstm.plist`:
+
+| Key | Type | Meaning |
+| --- | --- | --- |
+| `AlwaysMix` | array | bundle ids that are always demoted to mixing |
+| `NeverMix` | array | bundle ids that are never touched |
+| `AlwaysMixAll` | bool | demote every app except `NeverMix` |
+| `DebugLog` | bool | write `/var/mobile/Library/Logs/PDSTM.log` |
+
+Changes apply on the next cold start of the target app; no respring required.
+
 ---
 
 ## Installation Guide
