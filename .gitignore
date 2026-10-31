@@ -10,3 +10,6 @@ build_wsl.sh
 inspect.sh
 mk_testload.sh
 tc_*.sh
+
+probe_*.sh
+check_prefs*.sh

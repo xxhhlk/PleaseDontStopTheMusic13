@@ -30,6 +30,16 @@ jobs:
           echo "SDK_PATH=$SDK_PATH" >> $GITHUB_ENV
           echo "SDK setup complete: iPhoneOS${SDK_VER}.sdk"
 
+      # The rootful package targets iOS 13 and links Preferences.framework, which
+      # current SDKs no longer ship, so the iOS 13.7 SDK has to be present as well.
+      - name: Add iPhoneOS13.7 SDK
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git "$RUNNER_TEMP/theos-sdks"
+          git -C "$RUNNER_TEMP/theos-sdks" sparse-checkout set iPhoneOS13.7.sdk
+          rm -rf "$THEOS/sdks/iPhoneOS13.7.sdk"
+          cp -R "$RUNNER_TEMP/theos-sdks/iPhoneOS13.7.sdk" "$THEOS/sdks/"
+          ls -d "$THEOS/sdks/"*
+
       - name: Setup roothide Theos
         run: |
           ROOTHIDE_THEOS=${{ github.workspace }}/theos-roothide
