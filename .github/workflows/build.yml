@@ -41,8 +41,10 @@ jobs:
 
       - name: Install clang 11 iOS toolchain
         run: |
+          # The archive contains linux/iphone/..., so it unpacks into toolchain/.
           curl -fL -o /tmp/tc.tar.xz https://github.com/L1ghtmann/llvm-project/releases/download/main-update_3-eabca92/iOSToolchain-x86_64.tar.xz
-          tar -xf /tmp/tc.tar.xz -C "$THEOS"
+          mkdir -p "$THEOS/toolchain"
+          tar -xf /tmp/tc.tar.xz -C "$THEOS/toolchain"
           "$THEOS/toolchain/linux/iphone/bin/clang" --version | head -1
 
       - name: Build rootful
