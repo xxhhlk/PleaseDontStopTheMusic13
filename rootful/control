@@ -1,6 +1,6 @@
 Package: com.mikey820.pleasedontstopthemusic
 Name: PleaseDontStopTheMusic
-Version: 2.6.1-ios13
+Version: 2.6.3-ios13
 Architecture: iphoneos-arm
 Description: Prevent apps from pausing your background music (iOS 13 build)
 Maintainer: mikey820 <mikey820@users.noreply.github.com>

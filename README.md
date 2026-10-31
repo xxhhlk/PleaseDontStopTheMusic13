@@ -60,11 +60,14 @@ This build targets `firmware >= 13.0` (rootful, arm64). On top of the upstream h
 
 | Key | Type | Meaning |
 | --- | --- | --- |
+| `Enabled` | bool | master switch |
 | `AlwaysMix` | array | bundle ids that are always demoted to mixing |
 | `NeverMix` | array | bundle ids that are never touched |
 | `ForcePlayback` | array | bundle ids whose `PlayAndRecord` session is rewritten to `Playback` (no microphone) |
 | `AlwaysMixAll` | bool | demote every app except `NeverMix` |
 | `DebugLog` | bool | write `/var/mobile/Library/Logs/PDSTM.log` |
+
+- **Settings pane** — `设置 → PleaseDontStopTheMusic`, backed by a `PreferenceLoader` bundle, so the same values can be changed without editing plists: master switch, debug logging, the `AlwaysMixAll` toggle, and one app picker per list (installed apps are enumerated through `LSApplicationWorkspace` and toggled on and off). The prefs file is created on the first change and is not part of the package, so upgrading never overwrites an existing configuration.
 
 `ForcePlayback` exists for apps that never use the microphone: keeping them on a record-capable session makes iOS rebuild the input path on launch and teardown, which is audible as a short glitch in the playing music.
 

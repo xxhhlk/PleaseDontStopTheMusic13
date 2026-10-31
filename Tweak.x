@@ -42,7 +42,8 @@ static NSString *gBundleID     = nil;
 static BOOL      gIsVideoApp   = NO;   // TikTok: kept primary so its PiP clock runs
 static BOOL      gSessionActive = NO;  // tracks setActive: state (are we playing?)
 static BOOL      gAlwaysMixAll = NO;
-static BOOL      gDebug        = YES;
+static BOOL      gDebug        = NO;
+static BOOL      gEnabled      = YES;
 static NSArray  *gAlwaysMix    = nil;
 static NSArray  *gNeverMix     = nil;
 static NSArray  *gForcePlayback = nil;
@@ -108,7 +109,9 @@ static void PDSTMLog(NSString *fmt, ...) {
 static void PDSTMLoadPrefs(void) {
     NSDictionary *d = [NSDictionary dictionaryWithContentsOfFile:kPrefsPath];
     if (![d isKindOfClass:[NSDictionary class]]) return;
-    id v = d[@"AlwaysMix"];
+    id v = d[@"Enabled"];
+    if ([v respondsToSelector:@selector(boolValue)]) gEnabled = [v boolValue];
+    v = d[@"AlwaysMix"];
     if ([v isKindOfClass:[NSArray class]]) gAlwaysMix = v;
     v = d[@"NeverMix"];
     if ([v isKindOfClass:[NSArray class]]) gNeverMix = v;
@@ -239,6 +242,7 @@ static void PDSTMProbeLog(NSString *what, NSString *category, AVAudioSessionCate
 }
 
 static BOOL PDSTMShouldMix(void) {
+    if (!gEnabled) return NO;
     if (gIsVideoApp) return NO;
     if (gNeverMix && [gNeverMix containsObject:gBundleID]) return NO;
     if (gAlwaysMix && [gAlwaysMix containsObject:gBundleID]) return YES;
@@ -254,6 +258,7 @@ static BOOL PDSTMShouldMix(void) {
 static void PDSTMPost(NSString *name) { notify_post(name.UTF8String); }
 
 static void PDSTMGoSecondary(void) {
+    if (!gEnabled) return;
     if (gIsVideoApp) return;
     AVAudioSession *s = [AVAudioSession sharedInstance];
     NSString *cat = s.category;
