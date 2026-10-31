@@ -90,6 +90,13 @@ Example configuration — UU Remote keeps interrupting playback without ever pro
 
 Changes apply on the next cold start of the target app; no respring required.
 
+### Building
+
+`make -C rootful package FINALPACKAGE=1` needs a clang 11 iOS toolchain and the
+iPhoneOS13.7 SDK; `build_wsl.sh` sets both up inside WSL. CI builds the rootful
+package on Linux for the same reason — the macOS runner's clang cannot produce
+the old arm64e ABI — and builds rootless / roothide / jailed on macOS.
+
 ---
 
 ## Installation Guide
