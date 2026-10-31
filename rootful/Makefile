@@ -1,4 +1,4 @@
-TARGET = iphone:clang:13.7:13.0
+TARGET = iphone:clang:latest:13.0
 ARCHS = arm64
 INSTALL_TARGET_PROCESSES = SpringBoard
 
@@ -18,7 +18,9 @@ BUNDLE_NAME = PDSTMPrefs
 PDSTMPrefs_FILES = prefs/PDSTMPrefs.m
 PDSTMPrefs_CFLAGS = -fobjc-arc -Wno-deprecated-declarations
 PDSTMPrefs_FRAMEWORKS = UIKit
-PDSTMPrefs_PRIVATE_FRAMEWORKS = Preferences
+# Preferences.framework is not shipped in current SDKs. Settings has it loaded
+# already, so the symbols are resolved at load time instead of link time.
+PDSTMPrefs_LDFLAGS = -Wl,-undefined,dynamic_lookup
 PDSTMPrefs_INSTALL_PATH = /Library/PreferenceBundles
 PDSTMPrefs_RESOURCE_DIRS = prefs/Resources
 

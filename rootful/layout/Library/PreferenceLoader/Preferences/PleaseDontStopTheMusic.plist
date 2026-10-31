@@ -10,6 +10,8 @@
 		<string>PSLinkCell</string>
 		<key>detail</key>
 		<string>PDSTMRootListController</string>
+		<key>isController</key>
+		<true/>
 		<key>label</key>
 		<string>PleaseDontStopTheMusic</string>
 	</dict>

@@ -1,9 +1,50 @@
-#import <Preferences/PSListController.h>
-#import <Preferences/PSSpecifier.h>
 #import <UIKit/UIKit.h>
+#import <objc/runtime.h>
 #import <dlfcn.h>
 
+// Settings ships Preferences.framework, but recent SDKs no longer include it, so
+// the classes are declared here and resolved at load time. Declaring them
+// without ivars keeps the subclass layout independent of the real one; the
+// specifier cache lives in an associated object instead of the _specifiers ivar.
+
 static NSString *const kPrefsPath = @"/var/mobile/Library/Preferences/com.xxhhlk.pdstm.plist";
+
+@interface PSSpecifier : NSObject
++ (instancetype)preferenceSpecifierNamed:(NSString *)name
+                                  target:(id)target
+                                     set:(SEL)set
+                                     get:(SEL)get
+                                  detail:(Class)detail
+                                    cell:(NSInteger)cell
+                                    edit:(Class)edit;
++ (instancetype)groupSpecifierWithName:(NSString *)name;
+- (void)setProperty:(id)property forKey:(NSString *)key;
+- (id)propertyForKey:(NSString *)key;
+@property (nonatomic) SEL buttonAction;
+@end
+
+@interface PSListController : UIViewController
+- (NSArray *)specifiers;
+- (void)reloadSpecifiers;
+- (PSSpecifier *)specifier;
+@end
+
+// PSCellType values from Preferences/PSTableCell.h.
+enum { PSGroupCell = 0, PSLinkCell = 1, PSSwitchCell = 6, PSButtonCell = 13 };
+
+@interface LSApplicationProxy : NSObject
+- (NSString *)localizedName;
+- (NSString *)applicationIdentifier;
+- (NSString *)applicationType;
+- (NSURL *)bundleURL;
+@end
+
+@interface LSApplicationWorkspace : NSObject
++ (instancetype)defaultWorkspace;
+- (NSArray *)allInstalledApplications;
+@end
+
+#pragma mark - helpers
 
 static NSMutableDictionary *PDSTMReadPrefs(void) {
     NSMutableDictionary *d = [NSMutableDictionary dictionaryWithContentsOfFile:kPrefsPath];
@@ -25,25 +66,10 @@ static void PDSTMSetList(NSString *key, NSArray *list) {
     PDSTMWritePrefs(d);
 }
 
-// LSApplicationWorkspace is what Settings itself uses to enumerate installed
-// applications. It lives in MobileCoreServices.
-@interface LSApplicationProxy : NSObject
-- (NSString *)localizedName;
-- (NSString *)applicationIdentifier;
-- (NSString *)applicationType;
-- (NSURL *)bundleURL;
-@end
-
-@interface LSApplicationWorkspace : NSObject
-+ (instancetype)defaultWorkspace;
-- (NSArray *)allInstalledApplications;
-@end
-
 static NSArray *PDSTMInstalledApps(void) {
     static NSArray *cached = nil;
     if (cached) return cached;
 
-    dlopen("/System/Library/Frameworks/MobileCoreServices.framework/MobileCoreServices", RTLD_LAZY);
     dlopen("/System/Library/PrivateFrameworks/MobileCoreServices.framework/MobileCoreServices", RTLD_LAZY);
 
     NSMutableArray *apps = [NSMutableArray array];
@@ -76,6 +102,21 @@ static NSArray *PDSTMInstalledApps(void) {
         return [a[@"name"] localizedCaseInsensitiveCompare:b[@"name"]];
     }];
     return cached;
+}
+
+static NSMutableArray *PDSTMSpecifierCache(id controller) {
+    NSMutableArray *cache = objc_getAssociatedObject(controller, "PDSTMSpecifierCache");
+    if (!cache) {
+        cache = [NSMutableArray array];
+        objc_setAssociatedObject(controller, "PDSTMSpecifierCache", cache,
+                                 OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return cache;
+}
+
+static void PDSTMResetSpecifierCache(id controller) {
+    objc_setAssociatedObject(controller, "PDSTMSpecifierCache", nil,
+                             OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 }
 
 #pragma mark - Root pane
@@ -124,34 +165,40 @@ static NSArray *PDSTMInstalledApps(void) {
     PDSTMWritePrefs(d);
 }
 
+- (void)viewWillAppear:(BOOL)animated {
+    [super viewWillAppear:animated];
+    // List counts and the per-app switches are edited on the child panes, so the
+    // root pane has to rebuild itself when it comes back.
+    PDSTMResetSpecifierCache(self);
+    [self reloadSpecifiers];
+}
+
 - (NSArray *)specifiers {
-    if (!_specifiers) {
-        NSMutableArray *specs = [NSMutableArray array];
+    NSMutableArray *specs = PDSTMSpecifierCache(self);
+    if (specs.count) return specs;
 
-        PSSpecifier *general = [PSSpecifier groupSpecifierWithName:@"通用"];
-        [general setProperty:@"正在播放音乐时启动的其它 App 会被降级为可混音源，音乐不再被暂停。改动在目标 App 下次冷启动时生效。"
-                      forKey:@"footerText"];
-        [specs addObject:general];
-        [specs addObject:[self switchSpecifierNamed:@"启用" key:@"Enabled" fallback:YES]];
-        [specs addObject:[self switchSpecifierNamed:@"写入调试日志" key:@"DebugLog" fallback:NO]];
+    PSSpecifier *general = [PSSpecifier groupSpecifierWithName:@"通用"];
+    [general setProperty:@"正在播放音乐时启动的其它 App 会被降级为可混音源，音乐不再被暂停。改动在目标 App 下次冷启动时生效。"
+                  forKey:@"footerText"];
+    [specs addObject:general];
+    [specs addObject:[self switchSpecifierNamed:@"启用" key:@"Enabled" fallback:YES]];
+    [specs addObject:[self switchSpecifierNamed:@"写入调试日志" key:@"DebugLog" fallback:NO]];
 
-        PSSpecifier *rules = [PSSpecifier groupSpecifierWithName:@"规则"];
-        [rules setProperty:@"开启后除“永不处理”里的 App 外，全部降级为可混音源。"
-                    forKey:@"footerText"];
-        [specs addObject:rules];
-        [specs addObject:[self switchSpecifierNamed:@"所有 App 都降级" key:@"AlwaysMixAll" fallback:NO]];
+    PSSpecifier *rules = [PSSpecifier groupSpecifierWithName:@"规则"];
+    [rules setProperty:@"开启后除“永不处理”里的 App 外，全部降级为可混音源。"
+                forKey:@"footerText"];
+    [specs addObject:rules];
+    [specs addObject:[self switchSpecifierNamed:@"所有 App 都降级" key:@"AlwaysMixAll" fallback:NO]];
 
-        PSSpecifier *lists = [PSSpecifier groupSpecifierWithName:@"应用列表"];
-        [lists setProperty:@"始终降级：无论是否正在播放都会降级。\n改成纯播放：把录音会话改成播放会话，不开麦克风，避免启动/退出时的卡顿。\n永不处理：完全跳过这些 App。"
-                    forKey:@"footerText"];
-        [specs addObject:lists];
-        [specs addObject:[self listSpecifierNamed:@"始终降级" key:@"AlwaysMix"]];
-        [specs addObject:[self listSpecifierNamed:@"改成纯播放" key:@"ForcePlayback"]];
-        [specs addObject:[self listSpecifierNamed:@"永不处理" key:@"NeverMix"]];
+    PSSpecifier *lists = [PSSpecifier groupSpecifierWithName:@"应用列表"];
+    [lists setProperty:@"始终降级：无论是否正在播放都会降级。\n改成纯播放：把录音会话改成播放会话，不开麦克风，避免启动和退出时的卡顿。\n永不处理：完全跳过这些 App。"
+                forKey:@"footerText"];
+    [specs addObject:lists];
+    [specs addObject:[self listSpecifierNamed:@"始终降级" key:@"AlwaysMix"]];
+    [specs addObject:[self listSpecifierNamed:@"改成纯播放" key:@"ForcePlayback"]];
+    [specs addObject:[self listSpecifierNamed:@"永不处理" key:@"NeverMix"]];
 
-        _specifiers = specs;
-    }
-    return _specifiers;
+    return specs;
 }
 
 @end
@@ -164,52 +211,51 @@ static NSArray *PDSTMInstalledApps(void) {
 @implementation PDSTMAppListController
 
 - (NSString *)listKey {
-    return [self.specifier propertyForKey:@"listKey"];
+    return [[self specifier] propertyForKey:@"listKey"];
 }
 
 - (NSArray *)specifiers {
-    if (!_specifiers) {
-        NSString *key = [self listKey];
-        NSArray *apps = PDSTMInstalledApps();
+    NSMutableArray *specs = PDSTMSpecifierCache(self);
+    if (specs.count) return specs;
 
-        NSMutableArray *specs = [NSMutableArray array];
-        if (!apps.count) {
-            PSSpecifier *empty = [PSSpecifier groupSpecifierWithName:@""];
-            [empty setProperty:@"无法枚举已安装的 App。" forKey:@"footerText"];
-            [specs addObject:empty];
-        } else {
-            PSSpecifier *group = [PSSpecifier groupSpecifierWithName:
-                                  [NSString stringWithFormat:@"已选 %lu 项", (unsigned long)PDSTMList(key).count]];
-            [group setProperty:@"选中即写入名单，取消即移除。" forKey:@"footerText"];
-            [specs addObject:group];
-            for (NSDictionary *app in apps) {
-                PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:app[@"name"]
-                                                                   target:self
-                                                                      set:@selector(setApp:forSpecifier:)
-                                                                      get:@selector(getApp:)
-                                                                   detail:nil
-                                                                     cell:PSSwitchCell
-                                                                     edit:nil];
-                [spec setProperty:app[@"id"] forKey:@"bundleID"];
-                [specs addObject:spec];
-            }
-        }
+    NSString *key = [self listKey];
+    NSArray *apps = PDSTMInstalledApps();
 
-        PSSpecifier *actions = [PSSpecifier groupSpecifierWithName:@""];
-        [specs addObject:actions];
-        PSSpecifier *clear = [PSSpecifier preferenceSpecifierNamed:@"清空名单"
-                                                            target:self
-                                                               set:nil
-                                                               get:nil
-                                                            detail:nil
-                                                              cell:PSButtonCell
-                                                              edit:nil];
-        clear.buttonAction = @selector(clearList);
-        [specs addObject:clear];
-
-        _specifiers = specs;
+    if (!apps.count) {
+        PSSpecifier *empty = [PSSpecifier groupSpecifierWithName:@""];
+        [empty setProperty:@"无法枚举已安装的 App。" forKey:@"footerText"];
+        [specs addObject:empty];
+        return specs;
     }
-    return _specifiers;
+
+    PSSpecifier *group = [PSSpecifier groupSpecifierWithName:
+                          [NSString stringWithFormat:@"已选 %lu 项", (unsigned long)PDSTMList(key).count]];
+    [group setProperty:@"选中即写入名单，取消即移除。" forKey:@"footerText"];
+    [specs addObject:group];
+
+    for (NSDictionary *app in apps) {
+        PSSpecifier *spec = [PSSpecifier preferenceSpecifierNamed:app[@"name"]
+                                                           target:self
+                                                              set:@selector(setApp:forSpecifier:)
+                                                              get:@selector(getApp:)
+                                                           detail:nil
+                                                             cell:PSSwitchCell
+                                                             edit:nil];
+        [spec setProperty:app[@"id"] forKey:@"bundleID"];
+        [specs addObject:spec];
+    }
+
+    PSSpecifier *clear = [PSSpecifier preferenceSpecifierNamed:@"清空名单"
+                                                        target:self
+                                                           set:nil
+                                                           get:nil
+                                                        detail:nil
+                                                          cell:PSButtonCell
+                                                          edit:nil];
+    clear.buttonAction = @selector(clearList);
+    [specs addObject:clear];
+
+    return specs;
 }
 
 - (id)getApp:(PSSpecifier *)spec {
@@ -229,6 +275,7 @@ static NSArray *PDSTMInstalledApps(void) {
 
 - (void)clearList {
     PDSTMSetList([self listKey], @[]);
+    PDSTMResetSpecifierCache(self);
     [self reloadSpecifiers];
 }
 
